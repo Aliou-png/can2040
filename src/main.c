@@ -1,15 +1,72 @@
+#include "FreeRTOS.h"
+#include "pico/cyw43_arch.h"
+#include "queue.h"
+#include "task.h"
 #include <can2040.h>
 #include <hardware/regs/intctrl.h>
 #include <pico/stdlib.h>
 #include <stdio.h>
 
+static QueueHandle_t msg_queue;
+
+
 static struct can2040 cbus;
 
-static void can2040_cb(struct can2040 *cd, uint32_t notify,
-                       struct can2040_msg *msg) {
-  // Put your code here....
+#define HI 0x100
+
+#define MSG_PROC_TASK_PRIORITY (tskIDLE_PRIORITY + 1UL)
+#define MSG_PROC_TASK_STACK_SIZE configMINIMAL_STACK_SIZE
+
+/* -- MESSAGE PROCESSING LOGIC:
+  this is called to process massages:
+ */
+static void can2040_cb(struct can2040 *cd, uint32_t notify,struct can2040_msg *msg) {
+
+  // received a message
+  if (notify == CAN2040_NOTIFY_RX) {
+    BaseType_t wake_task = pdFALSE;
+    portYIELD_FROM_ISR(wake_task);
+    xQueueSendFromISR(
+          msg_queue,
+          msg,
+          &wake_task
+        );
+    // swtich to which ever task is waiting on wake_task imediatly after handler
+    portYIELD_FROM_ISR(wake_task);
+  }
+  // message was transmitted
+  else if (notify == CAN2040_NOTIFY_TX) {
+      // At least one other active CAN node ACKed this frame.
+  }
+  else if (notify == CAN2040_NOTIFY_ERROR) {
+        // can2040 receive buffer overflowed
+  }
+
 }
 
+/* -- SEND FUNCTION:
+    msg.id = 0x123;       // message type / identifier
+    msg.dlc = 6;          // how many bytes you are sending: Max 8
+    msg.data[0] = 'H';
+    msg.data[1] = 'e';
+    msg.data[2] = 'l';
+    msg.data[3] = 'l';
+    msg.data[4] = 'o';
+    msg.data[5] = '!';
+    // remaining two are ignored
+*/
+void send_message(void) {
+    struct can2040_msg msg = {
+        .id = HI,
+        .dlc = 3,
+        .data[0] = 'H',
+        .data[1] = 'i',
+        .data[2] = '.'
+    };
+    can2040_transmit(&cbus, &msg);
+}
+
+// -- INTERRUPT FOR HANDLING MESSAGES RX & TX:
 static void PIOx_IRQHandler(void) { can2040_pio_irq_handler(&cbus); }
 
 void canbus_setup(void) {
@@ -30,11 +87,59 @@ void canbus_setup(void) {
   can2040_start(&cbus, sys_clock, bitrate, gpio_rx, gpio_tx);
 }
 
+
+void send_thread(__unused void *arg)
+{
+  bool on = true;
+  hard_assert(cyw43_arch_init() == PICO_OK);
+  while (true) {
+
+    send_message();
+    // wait 2 seconds
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, on);   // on
+    on = !on;
+    vTaskDelay(pdMS_TO_TICKS(3000)); // every 3 second
+  }
+}
+
+void msg_process_thread(__unused void *arg) {
+
+  struct can2040_msg msg;
+  while (true) {
+    // Block here until the ISR supplies a CAN message.
+    // This uses no CPU time while there is no message.
+    if (xQueueReceive(msg_queue, &msg, portMAX_DELAY) == pdTRUE) {
+      printf("CAN ID: 0x%03lx | DLC: %u | Data:",
+            (unsigned long)msg.id,
+            (unsigned int)msg.dlc);
+
+      for (uint8_t i = 0; i < msg.dlc; i++) {
+          printf(" %02X", msg.data[i]);
+      }
+      printf("\n");
+    }
+     else {
+    printf("waiting for CAN...\n");
+  }
+}
+}
+
 int main(void) {
   stdio_init_all();
-  canbus_setup();
 
-  while (true) {
-    tight_loop_contents();
-  }
+  // msg_queue = xQueueCreate(50, sizeof(struct can2040_msg));  // before CAN
+
+  #ifdef ROLE_RECEIVER
+    msg_queue = xQueueCreate(50, sizeof(struct can2040_msg));
+    xTaskCreate(msg_process_thread, "rx", 512, NULL, MSG_PROC_TASK_PRIORITY, NULL);
+  #endif
+
+  #ifdef ROLE_SENDER
+    xTaskCreate(send_thread, "tx", 256, NULL, MSG_PROC_TASK_PRIORITY, NULL);
+  #endif
+
+  canbus_setup();
+  vTaskStartScheduler();   // once, and last
+
+  while (true) tight_loop_contents();
 }
