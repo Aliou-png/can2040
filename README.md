@@ -4,7 +4,7 @@ RASPBERRY PI PICO CAN BUS & FREERTOS
 
 This project implements a simple CAN bus communication and FreeRTOS tasks on the Raspberry Pi Pico (RP2040) using the can2040 library. It supports building and flashing different roles (Sender and Receiver) onto separate Pico boards.
 
-CAN transceivers:
+CAN transceivers: MCP2562FD
 
 https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP2561-2FD-High-Speed-CAN-Flexible-Data-Rate-Transceiver-DS20005284.pdf
 
